@@ -245,4 +245,91 @@ ORDER BY Year, Month;
 
 ---
 
+### Query 4: Top 3 Best-Selling Products by Category
+*CTEs*
+
+| | |
+|---|---|
+| **Business Context** | Category Leads want to know which products drive the most sales volume within their category, to inform stocking, promotion, and supplier negotiation priorities. |
+| **Approach** | Joined Order Details to Products and Categories, aggregated total quantity sold per product, then ranked products within their own category using `DENSE_RANK()`, returning the top 3 per category. |
+| **Assumption** | "Best-selling" was interpreted as highest **quantity sold** (units), reflecting sales volume rather than revenue. A high-volume, lower-priced product can outrank a high-revenue, lower-volume product under this definition — a deliberate choice, since the question asks about *selling* activity, not profitability. |
+| **Design Note** | Grouped by `CategoryID`/`ProductID` (not just names) to avoid any risk of two differently-keyed records colliding under the same display name. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH QuantityByCategory AS (
+    SELECT 
+        P.CategoryID, C.CategoryName, 
+        OD.ProductID, P.ProductName, 
+        OD.Quantity
+    FROM [Order Details] OD
+    JOIN Products P ON OD.ProductID = P.ProductID
+    JOIN Categories C ON C.CategoryID = P.CategoryID
+),
+CategoryQuantitySold AS (
+    SELECT 
+        CategoryID, CategoryName, ProductID, ProductName,
+        SUM(Quantity) AS TotalQuantitySold
+    FROM QuantityByCategory
+    GROUP BY CategoryID, CategoryName, ProductID, ProductName
+),
+RankedProducts AS (
+    SELECT 
+        CategoryName, ProductName, TotalQuantitySold,
+        DENSE_RANK() OVER (PARTITION BY CategoryName ORDER BY TotalQuantitySold DESC) AS QuantityRank
+    FROM CategoryQuantitySold
+)
+SELECT CategoryName, ProductName, TotalQuantitySold, QuantityRank
+FROM RankedProducts
+WHERE QuantityRank <= 3;
+```
+</details>
+
+**Key Insight:** Camembert Pierrot (Dairy Products) is the single best-selling product by volume across the entire catalog, and Dairy Products as a category shows the strongest and most consistent top-3 performance overall. Condiments, by contrast, has the lowest-selling #1 product of any category — suggesting comparatively weaker or more fragmented demand within that category.
+
+---
+
+### Query 5: Customers with Declining Order Frequency (Year-over-Year)
+*CTEs*
+
+| | |
+|---|---|
+| **Business Context** | Retention teams want an early warning signal for customers whose engagement is dropping, before a full churn event occurs. |
+| **Approach** | Counted orders per customer per year, used `LAG()` partitioned by customer and ordered by year to bring the previous year's order count into the same row, then filtered to customers whose order count declined. |
+| **Assumption** | A customer's first year of ordering has no prior year to compare against (`PreviousYearOrders` is `NULL`); these rows are automatically excluded by the `WHERE OrderChange < 0` filter, since any comparison against `NULL` evaluates to `UNKNOWN` rather than `TRUE`. |
+| **Design Note / Caveat** | The dataset ends mid-May 1998, so 1998 is a partial year. Nearly all flagged declines occur in 1998 as a result — comparing ~4 months of activity against a full 12-month 1997 mechanically produces a "decline" for most customers regardless of actual behavior. The small number of declines flagged in 1997 (comparing two complete years) are more reliable churn signals. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH OrderFrequency AS (
+    SELECT 
+        O.CustomerID, C.CompanyName, 
+        YEAR(O.OrderDate) AS Year,
+        COUNT(O.OrderDate) AS TotalOrders,
+        LAG(COUNT(O.OrderDate)) OVER (PARTITION BY O.CustomerID ORDER BY YEAR(O.OrderDate)) AS PreviousYearOrders
+    FROM Orders O
+    JOIN Customers C ON C.CustomerID = O.CustomerID
+    GROUP BY O.CustomerID, C.CompanyName, YEAR(O.OrderDate)
+),
+FrequencyChange AS (
+    SELECT 
+        CustomerID, CompanyName, Year, TotalOrders, PreviousYearOrders,
+        (TotalOrders - PreviousYearOrders) AS OrderChange
+    FROM OrderFrequency
+)
+SELECT CustomerID, CompanyName, Year, TotalOrders, PreviousYearOrders, OrderChange
+FROM FrequencyChange
+WHERE OrderChange < 0
+ORDER BY OrderChange ASC;
+```
+</details>
+
+**Key Insight:** Nearly all flagged declines occur in 1998, which is a partial year in this dataset (data ends mid-May 1998) — comparing a ~4-month year against a full 12-month 1997 will mechanically produce a "decline" for most customers, regardless of actual behavior. The small number of declines flagged in 1997 (e.g. VINET, TORTU, LILAS, DRACD, SPLIR) — comparing two complete years — represent more reliable churn signals and warrant closer investigation.
+
+---
+
 *Additional queries added as completed.*
