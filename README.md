@@ -332,4 +332,69 @@ ORDER BY OrderChange ASC;
 
 ---
 
+### Query 6: Employee Sales Performance vs. Company Average
+*CTEs*
+
+| | |
+|---|---|
+| **Business Context** | Sales management wants to identify which employees are exceeding or falling short of overall company sales performance, to inform coaching, recognition, or territory review. |
+| **Approach** | Calculated each employee's total net sales (discount-adjusted), then used `AVG() OVER ()` with no partition to compute a single company-wide average shown on every row, and labeled each employee's status with a `CASE WHEN` comparison. |
+| **Assumption** | Performance is measured by total net sales generated, not order count or average order value — the most direct read of "sales performance" for this question. |
+| **Design Note** | `AVG(TotalSales) OVER ()` with empty parentheses (no `PARTITION BY`) was used deliberately so the average is computed once across all employees and repeated identically on every row, enabling a direct row-by-row comparison. A three-branch `CASE WHEN` (Outperforming / Average / Underperforming) handles the edge case of an employee sitting exactly at the average, even though it doesn't occur in this dataset. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH LineItemPrice AS (
+    SELECT 
+        O.OrderID, O.EmployeeID, 
+        CONCAT(E.LastName, ' ', E.FirstName) AS FullName,
+        OD.UnitPrice, OD.Quantity, OD.Discount,
+        (OD.UnitPrice * OD.Quantity) AS Price
+    FROM Orders O
+    JOIN [Order Details] OD ON O.OrderID = OD.OrderID
+    JOIN Employees E ON E.EmployeeID = O.EmployeeID
+),
+LineItemDiscount AS (
+    SELECT 
+        OrderID, EmployeeID, FullName, Price,
+        (Discount * Price) AS DiscountAmount
+    FROM LineItemPrice
+),
+LineItemNetCost AS (
+    SELECT 
+        OrderID, EmployeeID, FullName,
+        (Price - DiscountAmount) AS NetCost
+    FROM LineItemDiscount
+),
+SalesByEmployee AS (
+    SELECT 
+        EmployeeID, FullName, 
+        ROUND(SUM(NetCost), 2) AS TotalSales
+    FROM LineItemNetCost
+    GROUP BY EmployeeID, FullName
+),
+AverageSales AS (
+    SELECT 
+        EmployeeID, FullName, TotalSales,
+        ROUND(AVG(TotalSales) OVER (), 2) AS CompanyAverageSales
+    FROM SalesByEmployee
+)
+SELECT 
+    EmployeeID, FullName, TotalSales, CompanyAverageSales,
+    CASE 
+        WHEN TotalSales > CompanyAverageSales THEN 'Outperforming'
+        WHEN TotalSales = CompanyAverageSales THEN 'Average'
+        ELSE 'Underperforming'
+    END AS PerformanceStatus
+FROM AverageSales
+ORDER BY TotalSales DESC;
+```
+</details>
+
+**Key Insight:** 4 of 9 employees outperform the company average (~$140,644), with Peacock Margaret leading at $232,890 — over 3x the lowest performer, Buchanan Steven ($68,792). This wide spread suggests meaningful variation in individual sales performance worth investigating further (e.g. tenure, territory, or account assignment).
+
+---
+
 *Additional queries added as completed.*
