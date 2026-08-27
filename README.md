@@ -397,4 +397,284 @@ ORDER BY TotalSales DESC;
 
 ---
 
+### Query 7: Products Never Ordered
+*Complex JOINs*
+
+| | |
+|---|---|
+| **Business Context** | Inventory and merchandising teams want to identify dead stock — products sitting in the catalog with zero sales history — to inform delisting, promotion, or clearance decisions. |
+| **Approach** | Used a `LEFT JOIN` from Products to Order Details to preserve every product regardless of order history, then filtered to products with a `COUNT` of zero matching order lines. |
+| **Result** | This query returns **zero rows** — every product in the Northwind catalog (all 77) has been ordered at least once. This was verified independently by comparing the count of distinct ProductIDs in Order Details against the total product count in Products, confirming a full match (77 = 77). |
+| **Design Note** | While there's no dead stock to flag in this specific dataset, the query itself represents the exact technique a real business would use to catch unsold inventory — and would return meaningful results on a live, larger, or less-curated catalog. In practice, a check like this would typically run on a recurring basis (e.g. quarterly) against live sales data. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+SELECT 
+    P.ProductID, 
+    P.ProductName,
+    COUNT(OD.OrderID) AS TotalOrders
+FROM Products P
+LEFT JOIN [Order Details] OD ON P.ProductID = OD.ProductID
+GROUP BY P.ProductID, P.ProductName
+HAVING COUNT(OD.OrderID) = 0
+ORDER BY P.ProductID;
+```
+</details>
+
+---
+
+### Query 8: Customers Who Purchased Every Product in a Category
+*Complex JOINs*
+
+| | |
+|---|---|
+| **Business Context** | Category leads want to identify their most category-loyal customers — those buying the full breadth of a category's catalog — as candidates for early access, loyalty programs, or category-specific outreach. |
+| **Approach** | A relational division pattern: counted each customer's distinct products purchased per category, separately counted each category's total distinct products, then joined the two and filtered to rows where the counts match exactly. |
+| **Design Note** | Used `COUNT(DISTINCT ...)` on both sides of the comparison so a customer repeatedly buying the same product isn't miscounted as covering more of the category than they actually have. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH CustomerCategoryProduct AS (
+    SELECT 
+        O.CustomerID, C.CompanyName, 
+        P.CategoryID, CA.CategoryName,
+        COUNT(DISTINCT OD.ProductID) AS ProductsPurchased
+    FROM Orders O
+    JOIN [Order Details] OD ON O.OrderID = OD.OrderID
+    JOIN Products P ON OD.ProductID = P.ProductID
+    JOIN Categories CA ON P.CategoryID = CA.CategoryID
+    JOIN Customers C ON C.CustomerID = O.CustomerID
+    GROUP BY O.CustomerID, C.CompanyName, P.CategoryID, CA.CategoryName
+),
+CategoryProduct AS (
+    SELECT 
+        CategoryID, 
+        COUNT(DISTINCT ProductID) AS CategoryProductCount
+    FROM Products
+    GROUP BY CategoryID
+)
+SELECT 
+    CCP.CustomerID, CCP.CompanyName, CCP.CategoryName,
+    CCP.ProductsPurchased, CP.CategoryProductCount
+FROM CustomerCategoryProduct CCP
+JOIN CategoryProduct CP ON CCP.CategoryID = CP.CategoryID
+WHERE CCP.ProductsPurchased = CP.CategoryProductCount
+ORDER BY CCP.CategoryName, CCP.CustomerID;
+```
+</details>
+
+**Key Insight:** Only one customer — Ernst Handel (ERNSH) — has purchased every product within a category, and they've done so in two categories (Dairy Products and Produce). Notably, Ernst Handel also ranked among the top-spending customers in Query 1, reinforcing that this is a high-value, highly engaged account. Both completed categories are relatively small (5 and 10 products respectively), which is worth noting — full category coverage is mathematically easier to achieve in smaller categories.
+
+---
+
+### Query 9: Late Shipments by Employee and Shipper
+*Complex JOINs*
+
+| | |
+|---|---|
+| **Business Context** | Operations wants to identify which employee/shipper combinations are most associated with late deliveries, to investigate whether delays are employee-driven, shipper-driven, or both. |
+| **Approach** | Defined a shipment as late when `ShippedDate` falls after `RequiredDate`. Calculated, per employee/shipper combination, both the raw count of late deliveries and the late-delivery *rate* (late orders ÷ total orders for that pair) — since raw count alone conflates delivery performance with order volume. |
+| **Assumption** | Lateness is derived from `RequiredDate` vs. `ShippedDate`, since Northwind has no dedicated delivery-tracking table. Orders with a `NULL` ShippedDate (never shipped) are automatically excluded, since any comparison against `NULL` evaluates to `UNKNOWN` rather than `TRUE`. |
+| **Design Note** | Joined on both `EmployeeID` and `ShipperID` together (a composite match), since matching on employee alone would incorrectly pair one employee's late orders with every shipper they've ever used, not just the relevant one. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH LateDelivery AS (
+    SELECT 
+        O.EmployeeID,
+        CONCAT(E.LastName, ' ', E.FirstName) AS FullName,
+        S.ShipperID,
+        S.CompanyName,
+        COUNT(*) AS LateDeliveryCount
+    FROM Orders O
+    JOIN Shippers S ON O.ShipVia = S.ShipperID
+    JOIN Employees E ON E.EmployeeID = O.EmployeeID
+    WHERE O.ShippedDate > O.RequiredDate
+    GROUP BY 
+        O.EmployeeID, E.LastName, E.FirstName, 
+        S.ShipperID, S.CompanyName
+),
+TotalOrderPerPair AS (
+    SELECT 
+        O.EmployeeID,
+        S.ShipperID,
+        COUNT(*) AS TotalOrders
+    FROM Orders O
+    JOIN Shippers S ON O.ShipVia = S.ShipperID
+    GROUP BY O.EmployeeID, S.ShipperID
+)
+SELECT 
+    LD.EmployeeID, LD.FullName, LD.ShipperID, LD.CompanyName, 
+    TP.TotalOrders, LD.LateDeliveryCount,
+    CAST(ROUND((LD.LateDeliveryCount * 1.0 / TP.TotalOrders) * 100, 2) AS DECIMAL(5,2)) AS LateDeliveryRatePct
+FROM LateDelivery LD
+JOIN TotalOrderPerPair TP 
+    ON LD.EmployeeID = TP.EmployeeID 
+    AND LD.ShipperID = TP.ShipperID
+ORDER BY LateDeliveryRatePct DESC;
+```
+</details>
+
+**Key Insight:** Dodsworth Anne + Speedy Express has the highest late-delivery rate (20.00%), despite a low raw count (2 late out of just 10 total orders) — a pairing a raw-count view alone would miss entirely. Peacock Margaret + United Package has the highest *raw* count (4 late deliveries) but only a middling 5.71% rate once her much higher order volume (70 total orders) is factored in — her raw count reflects volume, not poor performance. King Robert + United Package is the one pairing that ranks high on both raw count (4) and rate (16.67%), making it the strongest candidate for a genuine delivery concern.
+
+---
+
+### Query 10: Revenue and Average Order Value by Country
+*Aggregations*
+
+| | |
+|---|---|
+| **Business Context** | Leadership wants to compare countries not just by total revenue, but by typical order size, to distinguish volume-driven markets from markets where fewer, larger orders drive value. |
+| **Approach** | Calculated net revenue per order first (summing all line items within each order), then aggregated those order totals by country to get both total revenue (`SUM`) and average order value (`AVG`) — a two-stage aggregation, since averaging line items directly would understate true order value. |
+| **Assumption** | Revenue here is treated as **net** (discount-adjusted), consistent with Query 1's "Spending" — this question is about actual financial contribution per country, not gross sales activity, so net was judged the better fit (unlike Query 2, where gross was appropriate for a sales-volume trend). |
+| **Design Note** | Average order value is calculated by first collapsing each order's multiple line items into one order-level total, then averaging *those* totals — averaging raw line items directly would conflate "order size" with "how many products were in the order." |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH LineItemPrice AS (
+    SELECT 
+        O.OrderID, C.Country,
+        OD.UnitPrice, OD.Quantity, OD.Discount,
+        (OD.UnitPrice * OD.Quantity) AS Price
+    FROM Orders O
+    JOIN [Order Details] OD ON O.OrderID = OD.OrderID
+    JOIN Customers C ON O.CustomerID = C.CustomerID
+),
+LineItemDiscount AS (
+    SELECT 
+        OrderID, Country, Price,
+        (Discount * Price) AS DiscountAmount
+    FROM LineItemPrice
+),
+LineItemNetCost AS (
+    SELECT 
+        OrderID, Country,
+        (Price - DiscountAmount) AS NetCost
+    FROM LineItemDiscount
+),
+OrderValue AS (
+    SELECT 
+        OrderID, Country,
+        ROUND(SUM(NetCost), 2) AS OrderNetCost
+    FROM LineItemNetCost
+    GROUP BY OrderID, Country
+)
+SELECT 
+    Country, 
+    ROUND(SUM(OrderNetCost), 2) AS Revenue, 
+    ROUND(AVG(OrderNetCost), 2) AS AvgOrderValue
+FROM OrderValue
+GROUP BY Country
+ORDER BY Revenue DESC;
+```
+</details>
+
+**Key Insight:** USA and Germany lead on total revenue, but neither leads on average order value — that distinction belongs to Austria ($3,200) and Ireland ($2,630), both of which generate solid business through fewer, larger orders rather than high order volume. This divergence suggests different market strategies could apply: USA/Germany as volume-driven markets, Austria/Ireland as markets where larger, less frequent orders (e.g. bulk or wholesale buyers) drive value.
+
+---
+
+### Query 11: Revenue Lost to Discounts by Category
+*Aggregations*
+
+| | |
+|---|---|
+| **Business Context** | Category leads and pricing teams want to know which categories are giving away the most revenue through discounts, both in absolute terms and relative to their own sales, to identify margin-protection opportunities. |
+| **Approach** | Calculated gross revenue and total discount amount per category, then derived a discount rate (discount ÷ gross revenue × 100) so categories can be compared fairly regardless of size. |
+| **Design Note** | The discount rate is calculated from category-level summed totals, not raw per-line-item discount ratios — averaging individual line-item discount percentages would misrepresent the category's true overall discount burden. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH LineItemPrice AS (
+    SELECT 
+        P.ProductID, P.CategoryID, C.CategoryName,
+        OD.UnitPrice, OD.Quantity, OD.Discount,
+        (OD.UnitPrice * OD.Quantity) AS GrossRevenue
+    FROM [Order Details] OD
+    JOIN Products P ON P.ProductID = OD.ProductID
+    JOIN Categories C ON P.CategoryID = C.CategoryID
+),
+LineItemDiscount AS (
+    SELECT 
+        ProductID, CategoryID, CategoryName, GrossRevenue,
+        (Discount * GrossRevenue) AS DiscountAmount
+    FROM LineItemPrice
+),
+CategoryDiscount AS (
+    SELECT 
+        CategoryID, CategoryName,
+        ROUND(SUM(GrossRevenue), 2) AS GrossRevenue,
+        ROUND(SUM(DiscountAmount), 2) AS Discount
+    FROM LineItemDiscount
+    GROUP BY CategoryID, CategoryName
+)
+SELECT 
+    CategoryID, CategoryName, GrossRevenue, Discount,
+    ROUND((Discount * 1.0 / GrossRevenue) * 100, 2) AS DiscountRatePct
+FROM CategoryDiscount
+ORDER BY DiscountRatePct DESC;
+```
+</details>
+
+**Key Insight:** Meat/Poultry has the highest discount rate (8.51% of its revenue given away), despite not being the top-grossing category — Beverages and Dairy Products both generate more total revenue but discount less aggressively (6.51% and 6.69% respectively). This suggests Meat/Poultry may be over-discounted relative to its actual sales performance, worth investigating as a margin-protection opportunity.
+
+---
+
+### Query 12: Seasonal Demand Patterns Across Years
+*Aggregations*
+
+| | |
+|---|---|
+| **Business Context** | Leadership wants to know whether demand follows a predictable seasonal cycle (e.g. a consistently strong Q4), to inform inventory planning and staffing ahead of peak periods. |
+| **Approach** | Calculated net revenue grouped by quarter and year, ordered by quarter first so the same quarter across different years lines up for easy visual comparison. |
+| **Result / Caveat** | The dataset only contains a full 4 quarters for **1997** — 1996 has data for Q3–Q4 only, and 1998 has data for Q1–Q2 only (consistent with the partial-year issue identified in Queries 2, 3, and 5). This means a genuine, repeating seasonal pattern **cannot be reliably confirmed** from this dataset — only one complete year exists to test for a within-year cycle. |
+| **Design Note** | Within 1997 (the only complete year), revenue increased every quarter in sequence (Q1 → Q2 → Q3 → Q4), suggesting steady growth through the year rather than a specific "high season." Q1 1998 is more than double every other quarter in the dataset — this is better explained as an extension of the overall upward revenue trend already established in Query 2 than as evidence of Q1-specific seasonality. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH LineItemPrice AS (
+    SELECT 
+        O.OrderDate,  
+        OD.UnitPrice, OD.Quantity, OD.Discount,
+        (OD.UnitPrice * OD.Quantity) AS Price
+    FROM Orders O
+    JOIN [Order Details] OD ON O.OrderID = OD.OrderID
+),
+LineItemDiscount AS (
+    SELECT 
+        OrderDate, Price,
+        (Discount * Price) AS DiscountAmount
+    FROM LineItemPrice
+),
+LineItemNetCost AS (
+    SELECT 
+        OrderDate, 
+        (Price - DiscountAmount) AS Net
+    FROM LineItemDiscount
+)
+SELECT 
+    DATEPART(QUARTER, OrderDate) AS Quarter, 
+    DATEPART(YEAR, OrderDate) AS Year,
+    ROUND(SUM(Net), 2) AS Revenue 
+FROM LineItemNetCost
+GROUP BY DATEPART(QUARTER, OrderDate), DATEPART(YEAR, OrderDate)
+ORDER BY Quarter, Year;
+```
+</details>
+
+**Key Insight:** This dataset does not support a reliable seasonality conclusion — only 1997 has complete quarterly data across all four quarters, and within that single year, revenue increased steadily every quarter (Q1 → Q2 → Q3 → Q4), with no sign of a seasonal dip. The apparent Q1 1998 spike is better explained by the dataset's overall revenue growth trend (established in Query 2/3) than by genuine seasonality, since 1996 and 1998 are both partial years and cannot be fairly compared quarter-for-quarter against each other or against 1997.
+
+---
+
 *Additional queries added as completed.*
