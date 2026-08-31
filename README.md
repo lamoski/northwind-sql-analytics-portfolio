@@ -677,4 +677,165 @@ ORDER BY Quarter, Year;
 
 ---
 
-*Additional queries added as completed.*
+### Query 13: Customer Churn Risk (Inactivity vs. Historical Pattern)
+*Business Problem Solving*
+
+| | |
+|---|---|
+| **Business Context** | Retention teams want to flag customers who have gone unusually quiet *relative to their own normal buying rhythm*, rather than using a single fixed inactivity window that ignores how often a given customer typically orders. |
+| **Approach** | Calculated each customer's average interval between consecutive orders using `LAG()` and `DATEDIFF()`, then compared that to their current inactivity (days since their last order, measured against the dataset's overall last order date). Customers whose current gap exceeds **double** their historical average are flagged "At Risk." |
+| **Assumption** | Since the dataset has no real "today," the dataset's own most recent order date `(SELECT MAX(OrderDate) FROM Orders)` was used as the reference point for "now" — calculated dynamically rather than hardcoded, so the query remains correct if run against an updated dataset. |
+| **Design Note** | A plain "current gap > average gap" threshold flagged 16 customers, including several barely over their own average (e.g. a customer 3 days past a 58-day average) — too weak a signal to act on. Requiring the current gap to exceed **2x** the historical average narrowed this to 6 customers with genuinely significant, actionable inactivity. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH PreviousCustomerOrder AS (
+    SELECT 
+        O.CustomerID, C.CompanyName, O.OrderDate,
+        LAG(O.OrderDate) OVER (PARTITION BY O.CustomerID ORDER BY O.OrderDate) AS PreviousOrderDate
+    FROM Orders O
+    JOIN Customers C ON C.CustomerID = O.CustomerID
+),
+CustomerOrderInterval AS (
+    SELECT 
+        CustomerID, CompanyName, OrderDate, PreviousOrderDate,
+        DATEDIFF(DAY, PreviousOrderDate, OrderDate) AS OrderInterval
+    FROM PreviousCustomerOrder
+),
+CustomerOrderAverage AS (
+    SELECT 
+        CustomerID, CompanyName, 
+        AVG(OrderInterval) AS AvgOrderInterval
+    FROM CustomerOrderInterval
+    GROUP BY CustomerID, CompanyName
+),
+CustomerLastOrder AS (
+    SELECT 
+        CustomerID,
+        DATEDIFF(DAY, MAX(OrderDate), (SELECT MAX(OrderDate) FROM Orders)) AS OrderToDate
+    FROM Orders
+    GROUP BY CustomerID
+),
+CustomerPattern AS (
+    SELECT 
+        CLO.CustomerID, COA.CompanyName, COA.AvgOrderInterval, CLO.OrderToDate,
+        CASE 
+            WHEN CLO.OrderToDate > COA.AvgOrderInterval * 2 THEN 'At Risk'
+            ELSE 'No Risk'
+        END AS Pattern
+    FROM CustomerOrderAverage COA 
+    JOIN CustomerLastOrder CLO ON COA.CustomerID = CLO.CustomerID
+)
+SELECT CustomerID, CompanyName, AvgOrderInterval, OrderToDate, Pattern 
+FROM CustomerPattern 
+WHERE Pattern = 'At Risk';
+```
+</details>
+
+**Key Insight:** 6 customers are currently inactive for more than double their normal ordering rhythm, ranging from LACOR (typically orders every 18 days, now 43 days quiet — 2.4x) to LAZYK (typically every 62 days, now 349 days quiet — 5.6x). These represent the strongest, most individualized churn signals in the dataset — flagged relative to each customer's own behavior rather than a one-size-fits-all inactivity window.
+
+---
+
+### Query 14: Sales Territory Coverage Gaps
+*Business Problem Solving*
+
+| | |
+|---|---|
+| **Business Context** | Operations wants to identify territories with weak or no employee coverage, to assess staffing risk and prioritize hiring or reassignment. |
+| **Approach** | Used a `LEFT JOIN` from Territories to the EmployeeTerritories bridge table to preserve every territory regardless of assignment, counted assigned employees per territory, then labeled each territory's coverage level with a `CASE WHEN`. |
+| **Assumption** | Coverage thresholds were defined as: 0 employees = "No Coverage", 1 employee = "Weak Coverage" (a single point of failure with no backup), 2+ = "Adequate Coverage". |
+| **Result** | No territory in the dataset has 2 or more assigned employees — the "Adequate Coverage" tier is never reached anywhere in the current structure. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH TerritoryCoverage AS (
+    SELECT 
+        T.TerritoryID, T.TerritoryDescription, 
+        COUNT(ET.EmployeeID) AS Employee
+    FROM Territories T
+    LEFT JOIN EmployeeTerritories ET ON T.TerritoryID = ET.TerritoryID
+    GROUP BY T.TerritoryID, T.TerritoryDescription
+)
+SELECT 
+    TerritoryID, TerritoryDescription, Employee,
+    CASE 
+        WHEN Employee = 0 THEN 'No Coverage'
+        WHEN Employee = 1 THEN 'Weak Coverage'
+        ELSE 'Adequate Coverage'
+    END AS CoverageStatus
+FROM TerritoryCoverage
+ORDER BY Employee;
+```
+</details>
+
+**Key Insight:** No territory in the entire dataset has more than one assigned employee — coverage is either exactly 1 (a single point of failure, with no backup if that employee is unavailable) or 0 (no coverage at all). Four territories have zero coverage: Columbia, Bentonville, Dallas, and Austin. This means the "Adequate Coverage" threshold (2+ employees) is never met anywhere in the current structure — every covered territory operates with zero redundancy.
+
+---
+
+### Query 15: Stockout Risk (Sales Velocity vs. Units in Stock)
+*Business Problem Solving*
+
+| | |
+|---|---|
+| **Business Context** | Inventory planning wants to flag products likely to run out soon, based on how fast they're actually selling right now — not just a static "low stock" count that ignores demand. |
+| **Approach** | Calculated each product's sales velocity (total quantity sold ÷ number of months between its first and last order), then divided current `UnitsInStock` by that monthly rate to estimate months of stock remaining. |
+| **Assumption** | Products with `UnitsInStock = 0` were separated into their own "Out of Stock" category rather than folded into "At Risk," since being already out is a current problem, not a forecasted one. Among products with remaining stock, less than 1 month of runway was set as the "At Risk" threshold, based on where the data showed a natural cluster of low values before a gap into the 1.5+ month range. |
+| **Design Note** | Velocity (a rate over time) was used instead of raw total quantity sold, since two products with identical lifetime sales totals can have very different urgency depending on whether those sales happened over 2 months or 20. |
+
+<details>
+<summary>View SQL</summary>
+
+```sql
+WITH QuantityByProduct AS (
+    SELECT 
+        OD.ProductID, SUM(OD.Quantity) AS Quantity 
+    FROM [Order Details] OD 
+    JOIN Orders O ON OD.OrderID = O.OrderID
+    GROUP BY ProductID
+),
+OrderDateRange AS (
+    SELECT 
+        OD.ProductID, MIN(O.OrderDate) AS Earliest, MAX(O.OrderDate) AS Latest 
+    FROM [Order Details] OD 
+    JOIN Orders O ON OD.OrderID = O.OrderID
+    GROUP BY OD.ProductID
+),
+DateInterval AS (
+    SELECT 
+        QP.ProductID, QP.Quantity, ODR.Earliest, ODR.Latest, 
+        DATEDIFF(MONTH, ODR.Earliest, ODR.Latest) AS MonthDuration 
+    FROM QuantityByProduct QP 
+    JOIN OrderDateRange ODR ON QP.ProductID = ODR.ProductID
+),
+MonthlyQuantity AS (
+    SELECT 
+        DI.ProductID, DI.Earliest, DI.Latest, DI.Quantity, DI.MonthDuration,
+        CAST((DI.Quantity * 1.0 / DI.MonthDuration) AS DECIMAL(5,2)) AS MonthlyQuantity, 
+        P.UnitsInStock
+    FROM DateInterval DI
+    JOIN Products P ON P.ProductID = DI.ProductID
+),
+StockCapacity AS (
+    SELECT *, 
+        CAST((UnitsInStock / MonthlyQuantity) AS DECIMAL(5,2)) AS MonthRemaining 
+    FROM MonthlyQuantity
+)
+SELECT *,
+    CASE
+        WHEN MonthRemaining <= 0 THEN 'Out of Stock'
+        WHEN MonthRemaining <= 1 THEN 'At Risk'
+        ELSE 'Sufficient'
+    END AS Status
+FROM StockCapacity;
+```
+</details>
+
+**Key Insight:** 48% of the catalog (37 of 77 products) is At Risk of stockout within a month at current sales velocity, and 5 products are already Out of Stock — together, over half the catalog has an active inventory concern. The most urgent case is Product 21, which sells roughly 48 units/month against only 3 units currently in stock — under 3 days of runway. This velocity-based approach surfaces risk that a simple "low stock count" metric would miss: a product with 20 units in stock selling 40/month is in far more danger than one with 10 units selling 2/month, even though the raw stock number looks worse for the second product.
+
+---
+
+*All 15 queries complete.*
