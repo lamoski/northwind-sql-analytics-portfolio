@@ -28,6 +28,9 @@ The **Northwind database** is a sample dataset originally released by Microsoft,
 | `Categories` | Product category lookup | CategoryID, CategoryName |
 | `Customers` | Customer master data | CustomerID, CompanyName, Country |
 | `Employees` | Sales staff | EmployeeID, FirstName, LastName, HireDate |
+| `Shippers` | Shipping companies used to deliver orders | ShipperID, CompanyName |
+| `Territories` | Sales territories the company operates in | TerritoryID, TerritoryDescription |
+| `EmployeeTerritories` | Bridge table linking employees to the territories they cover | EmployeeID, TerritoryID |
 
 ## Data Quality Notes
 
@@ -41,6 +44,8 @@ Exploration focused on the tables used in this project (`Orders`, `Order Details
 | `PostalCode` | Customers | One customer missing postal code | Likely data entry gap | No impact; not referenced in any query |
 | `Fax` | Customers | Some customers missing fax number | Expected — fax was an optional/legacy contact field | No impact; not used in analysis |
 | `Region` | Employees | Some employees have no region | Structural — same reasoning as Customers.Region | No impact; not used in current queries |
+
+`Shippers`, `Territories`, and `EmployeeTerritories` were also reviewed and showed no nulls or structural anomalies.
 
 **Key takeaway:** Most nulls in this dataset reflect legitimate structural gaps in international address formats rather than data quality problems. The one null pattern with real analytical relevance — missing `ShippedDate` — was accounted for directly in the relevant business question rather than treated as an error to clean.
 
@@ -838,4 +843,4 @@ FROM StockCapacity;
 
 ---
 
-
+*All 15 queries complete.*
