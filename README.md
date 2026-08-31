@@ -843,4 +843,4 @@ FROM StockCapacity;
 
 ---
 
-*All 15 queries complete.*
+
